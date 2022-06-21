@@ -465,6 +465,8 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs):
     should_check_result = should_randomize_input = args.randomize_input
     is_correct = True
 
+    baseline_model_iter_fn = get_baseline_model_iter_fn(args, model_iter_fn)
+    baseline_model = get_baseline_model(args, model)
     for rep in range(args.repeat):
         inputs = (
             randomize_input(copy.deepcopy(example_inputs))
@@ -474,7 +476,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs):
 
         # interleave the runs to handle frequency scaling and load changes
         timings[rep, 0], expected_output = timed(
-            model, model_iter_fn, inputs, return_result=True
+            baseline_model, baseline_model_iter_fn, inputs, return_result=True
         )
         with torchdynamo.run():
             timings[rep, 1], actual_output = timed(
@@ -485,6 +487,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs):
     pvalue = ttest_ind(timings[:, 0], timings[:, 1]).pvalue
     median = np.median(timings, axis=0)
     speedup = median[0] / median[1]
+    print(f"timings {timings}") # TODO
     output_csv(
         output_filename,
         ("dev", "name", "speedup"),
@@ -798,6 +801,12 @@ def main():
         "--nvfuser", action="store_true", help="enable nvfuser globally"
     )
     parser.add_argument(
+        "--nofuser", action="store_true", help="Disable all fusers"
+    )
+    parser.add_argument(
+        "--use-xla-baseline", action="store_true", help="Whether to run baseline on XLA devices or eager devices"
+    )
+    parser.add_argument(
         "--isolate", action="store_true", help="run each model in its own process"
     )
 
@@ -870,6 +879,16 @@ def main():
         "--speedup-ltc-trivial",
         action="store_true",
         help="speedup using the ltc backend without reusing compiled graph",
+    )
+    group.add_argument(
+        "--speedup-torchxla-trivial",
+        action="store_true",
+        help="speedup using the torchxla backend without reusing compiled graph",
+    )
+    group.add_argument(
+        "--speedup-torchxla",
+        action="store_true",
+        help="speedup using the torchxla backend",
     )
     group.add_argument(
         "--cold-start", action="store_true", help=help(cold_start_experiment)
@@ -998,6 +1017,11 @@ def main():
         torch._C._jit_override_can_fuse_on_gpu(False)
         torch._C._jit_set_texpr_fuser_enabled(False)
         torch._C._jit_set_nvfuser_enabled(True)
+    elif args.nofuser:
+        torch._C._jit_override_can_fuse_on_cpu(False)
+        torch._C._jit_override_can_fuse_on_gpu(False)
+        torch._C._jit_set_texpr_fuser_enabled(False)
+        torch._C._jit_set_nvfuser_enabled(False)
     else:
         torch._C._jit_override_can_fuse_on_cpu(True)
         torch._C._jit_override_can_fuse_on_gpu(True)
@@ -1111,6 +1135,20 @@ def main():
         )
         experiment = speedup_experiment
         output_filename = "speedups_ltc_trivial.csv"
+        args.isolate = True
+    elif args.speedup_torchxla_trivial:
+        optimize_ctx = torchdynamo.optimize(
+            backends.torchxla_trivial, nopython=args.nopython
+        )
+        experiment = speedup_experiment
+        output_filename = "speedups_torchxla_trivial.csv"
+        args.isolate = True
+    elif args.speedup_torchxla:
+        optimize_ctx = torchdynamo.optimize(
+            backends.torchxla_reuse_graph, nopython=args.nopython
+        )
+        experiment = speedup_experiment
+        output_filename = "speedups_torchxla.csv"
         args.isolate = True
     elif args.speedup_fixed1:
         optimize_ctx = torchdynamo.optimize(fixed_strategy1, nopython=args.nopython)
@@ -1245,6 +1283,7 @@ def main():
                 model, example_inputs = cast_to_fp16(model, example_inputs)
 
             run_one_model(
+                args,
                 name,
                 model,
                 args.training,
@@ -1286,6 +1325,7 @@ def main():
             elif args.float16:
                 model, example_inputs = cast_to_fp16(model, example_inputs)
             run_one_model(
+                args,
                 name,
                 model,
                 args.training,
@@ -1323,8 +1363,47 @@ def print_summary(filename):
         except Exception:
             pass
 
+def xla_wrapper(model_iter_fn):
+    """
+    Wrap the model_iter_fn to run the model on XLA devices.
+    """
+    def wrapper(mod, inputs, collect_outputs=True):
+        import torch_xla.core.xla_model as xm
+        xla_dev = xm.xla_device()
+        eager_dev = inputs[0].device
+        # We assume the passed in mod is already on xla device
+        # so we dont need: xla_mod = copy.deepcopy(mod).to(device=xla_dev)
+        xla_mod = mod
+        xla_inputs = tree_map(
+            lambda x: x.to(device=xla_dev),
+            inputs)
+        xla_out = model_iter_fn(xla_mod, xla_inputs, collect_outputs)
+        if isinstance(xla_out, torch.Tensor):
+            return xla_out.to(device=eager_dev)
+        elif hasattr(xla_out, "__dict__"):
+            for k in xla_out.__dict__.keys():
+                if xla_out.__dict__[k] is None:
+                    continue
+                xla_out.__dict__[k] = tree_map(
+                    lambda x: x.to(device=eager_dev), xla_out.__dict__[k])
+            return xla_out
+        else:
+            raise RuntimeError(f"Can not handle type {type(xla_out)}")
+    return wrapper
+
+def get_baseline_model_iter_fn(args, model_iter_fn):
+    return xla_wrapper(model_iter_fn) if args.use_xla_baseline else model_iter_fn
+
+def get_baseline_model(args, model):
+    if args.use_xla_baseline:
+        import torch_xla.core.xla_model as xm
+        xla_dev = xm.xla_device()
+        return copy.deepcopy(model).to(device=xla_dev)
+    else:
+        return model
 
 def run_one_model(
+    args,
     name,
     model,
     is_training,
@@ -1348,6 +1427,8 @@ def run_one_model(
     ):
         tolerance = 8 * 1e-3
 
+    baseline_model_iter_fn = get_baseline_model_iter_fn(args, model_iter_fn)
+    baseline_model = get_baseline_model(args, model)
     with pick_grad(name, is_training):
         mode = "train" if is_training else "eval"
         sys.stdout.write(f"{current_device:4} {mode:5} {current_name:34} ")
@@ -1356,11 +1437,11 @@ def run_one_model(
             assert not torchdynamo.utils.is_jit_model(submod)
 
         torch.manual_seed(1337)
-        correct_result = model_iter_fn(copy.deepcopy(model), example_inputs)
+        correct_result = baseline_model_iter_fn(copy.deepcopy(baseline_model), example_inputs)
 
         torch.manual_seed(1337)
         if current_name not in NONDETERMINISTIC:
-            correct_rerun_result = model_iter_fn(copy.deepcopy(model), example_inputs)
+            correct_rerun_result = baseline_model_iter_fn(copy.deepcopy(baseline_model), example_inputs)
             if not same(correct_result, correct_rerun_result):
                 print("INCORRECT - Variation in Eager runs itself")
                 if not skip_accuracy_check:
@@ -1389,6 +1470,8 @@ def run_one_model(
             pass
         elif not same(correct_result, new_result, cos_similarity, tolerance):
             print("INCORRECT")
+            # print(f"correct_result {correct_result[0][0:10]}, new_result {new_result[0][0:10]}")  # TODO remove this line before commit
+            print(f"correct_result {correct_result}, new_result {new_result}")  # TODO remove this line before commit
             if not skip_accuracy_check:
                 return sys.exit(-1)
         ok, total = Stats.reset_counters()
