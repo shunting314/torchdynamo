@@ -13,6 +13,7 @@ import torch
 import torchdynamo.convert_frame
 from torchdynamo.optimizations.subgraph import SubGraph
 from torchdynamo.utils import identity
+import time
 
 log = logging.getLogger(__name__)
 BACKENDS = dict()
@@ -740,11 +741,15 @@ def torchxla_trivial(gm: torch.fx.GraphModule, example_inputs):
 
     xla_model = copy.deepcopy(gm).to(device=xla_dev)
     def xla_model_wrapper(*inputs):
+        start_ts = time.time()
         orig_device = inputs[0].device if len(inputs) > 0 else "cpu"
+        # import pdb; pdb.set_trace() # TODO
         xla_inputs = tuple(inp.to(device=xla_dev) for inp in inputs)
 
         xla_out = xla_model(*xla_inputs)
-        return tuple(out.to(device=orig_device) for out in xla_out)
+        result = tuple(out.to(device=orig_device) for out in xla_out)
+        print(f"torchxla_trivial wrapper takes {time.time() - start_ts} seconds") # TODO
+        return result
     return xla_model_wrapper
 
 def torchxla_reuse_graph(gm: torch.fx.GraphModule, example_inputs):

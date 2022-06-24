@@ -3,6 +3,7 @@ import torch
 from torch import fx, nn
 import copy
 import torchdynamo.optimizations.torchxla_integration as integration
+import torch.utils._pytree as pytree
 
 class BasicModule(nn.Module):
     def __init__(self):
@@ -34,6 +35,19 @@ class LinearModule(nn.Module):
 
     def get_random_inputs(self):
         return (torch.randn(10),)
+
+
+class ModuleInplaceUpdate(nn.Module):
+    def __init__(self):
+        super(ModuleInplaceUpdate, self).__init__()
+
+    def forward(self, a, b):
+        a.sub_(b)
+        return b - 1, b + 1
+
+    def get_random_inputs(self):
+        return (torch.randn(10), torch.randn(10))
+
 
 def allclose(expected, actual):
     def unwrap(cont):
@@ -70,7 +84,10 @@ def make_reuse_graph_test(module_class, niter=100):
             # Since we need use xla to calculate expected results
             xla_inputs = tuple(copy.deepcopy(inp).to(device=xla_dev) for inp in rand_args)
             xla_out = xla_module(*xla_inputs)
-            expected = xla_out.to(device=orig_dev)
+            # copy xla_inputs back to rand_args since the model may inplace update
+            # the arguments
+            rand_args = tuple(inp.to(device=orig_dev) for inp in xla_inputs)
+            expected = pytree.tree_map(lambda o: o.to(device=orig_dev), xla_out)
 
             actual = optimized_mod(*rand_args_copy)
 
@@ -82,10 +99,11 @@ def make_reuse_graph_test(module_class, niter=100):
             # to handle inplace updates.
             if not allclose(rand_args, rand_args_copy):
                 print(f"Incorrect updated arguments at iter {i}. expected\n{rand_args}, actual\n{rand_args_copy}")
-                self.asesrtTrue(False)
+                self.assertTrue(False)
     return test_wrapper
 
 class TorchXLAReuseGraphTest(unittest.TestCase):
     test_basic = make_reuse_graph_test(BasicModule)
     test_matmul = make_reuse_graph_test(MatmulModule)
     test_linear = make_reuse_graph_test(LinearModule)
+    test_inplace_update = make_reuse_graph_test(ModuleInplaceUpdate)
