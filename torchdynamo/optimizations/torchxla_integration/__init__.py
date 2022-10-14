@@ -69,12 +69,19 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
 
     tensor_id_to_arg_idx = {tensor_id: i for i, tensor_id in enumerate(args_tensor_ids)}
     xla_out = xla_model(*xla_args)
-    args_need_update = torch_xla._XLAC._check_tensor_need_materialization(xla_args)
-
     if not isinstance(xla_out, (tuple, list)):
         xla_out = (xla_out,)
 
-    args_and_out = tuple(xla_args) + tuple(xla_out)
+    # If a arg is being in place updated by model, we need to include arg as part of the graph result.
+    xla_args_need_update_bool = torch_xla._XLAC._check_tensor_need_materialization(xla_args)
+    xla_args_need_update = []
+    arg_index_to_need_update_index = {}
+    for i, nede_update in enumerate(xla_args_need_update_bool):
+        if nede_update:
+            arg_index_to_need_update_index[i] = len(xla_args_need_update)
+            xla_args_need_update.append(xla_args[i])
+
+    args_and_out = tuple(xla_args_need_update) + tuple(xla_out)
 
     if debug or True:
         print(f"XLA IR Text: {torch_xla._XLAC._get_xla_tensors_text(args_and_out)}")
@@ -116,17 +123,20 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
         copy_args_ts = time.time()
         assert len(res) == len(args_and_out)
         ncopy = 0
-        
-        for i, nede_update in enumerate(args_need_update):
-            if nede_update:
-                args[i].copy_(res[i])
-                ncopy += 1
+
+        for arg_index, res_index in arg_index_to_need_update_index.items():
+            args[arg_index].copy_(res[res_index])
+        # for i, nede_update in enumerate(xla_args_need_update_bool):
+        #     if nede_update:
+        #         args[i].copy_(res[i])
+        #         ncopy += 1
 
         print(f"Copy {ncopy} args takes {time.time() - copy_args_ts} seconds")
 
         # need to convert xla tensor back to eager tensor
         copy_res_ts = time.time()
-        result = [x.to(device=eager_device) for x in res[len(args):]]
+        # First few elements might be xla_args that needs to be in place updated
+        result = [x.to(device=eager_device) for x in res[len(xla_args_need_update):]]
         print(f"Copy results takes {time.time() - copy_res_ts} seconds")
 
         print(f"prepare output takes {time.time() - prepare_output_ts} seconds")
