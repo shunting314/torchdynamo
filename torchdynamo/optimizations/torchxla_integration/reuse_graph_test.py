@@ -66,6 +66,7 @@ def allclose(expected, actual):
 
 def make_reuse_graph_test(module_class, niter=100):
     def test_wrapper(self):
+        #import pdb; pdb.set_trace()
         print("Enter test case")
         import torch_xla.core.xla_model as xm
         xla_dev = xm.xla_device()
