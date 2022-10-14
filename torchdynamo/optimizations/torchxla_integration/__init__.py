@@ -108,9 +108,7 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
         eager_device = args[0].device
         graph_input = graph_input_matcher(args)
         start_ts = time.time()
-        res, graph_input_handles, graph_output_handles = torch_xla._XLAC._run_cached_graph(graph_hash, graph_input)
-        model_input_handles = graph_input_matcher.map_to_inputs(graph_input_handles)
-        print(f"graph_input_handles {graph_input_handles}, graph_output_handles {graph_output_handles}, model_input_handles {model_input_handles}")
+        res = torch_xla._XLAC._run_cached_graph(graph_hash, graph_input)
         print(f"torchxla reuse compiled graph run_cached_graph takes {time.time() - start_ts} seconds") # TODO
 
         prepare_output_ts = time.time()
@@ -119,24 +117,10 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
         assert len(res) == len(args_and_out)
         ncopy = 0
         
-        assert len(args) == len(model_input_handles)
-        assert len(args) < len(graph_output_handles)
-
         for i, nede_update in enumerate(args_need_update):
             if nede_update:
                 args[i].copy_(res[i])
                 ncopy += 1
-        
-        # for i, arg in enumerate(args):
-        #     if model_input_handles[i] != graph_output_handles[i]:
-        #         arg.copy_(res[i])
-        #         ncopy += 1
-        # if False:
-        #     for i, arg in enumerate(args):
-        #         # only copy those tensors that get inplace updated
-        #         if arg is not res[i]:
-        #             arg.copy_(res[i])
-        #             ncopy += 1
 
         print(f"Copy {ncopy} args takes {time.time() - copy_args_ts} seconds")
 
