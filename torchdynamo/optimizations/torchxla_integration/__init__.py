@@ -4,6 +4,7 @@ import os
 from torch import fx
 import torch_xla
 import torch_xla.core.xla_model as xm
+import torch_xla.debug.metrics as metrics
 import dataclasses
 from typing import Dict, List, Any
 import time
@@ -57,6 +58,17 @@ class GraphInputMatcher:
         assert not any(x is None for x in ret)
         return ret
 
+def get_fallback_ops():
+    fallback_ops = []
+    for opname in metrics.counter_names():
+        if "aten::" not in opname:
+            continue
+        val = int(metrics.counter_value(opname))
+        if val > 0:
+            fallback_ops.append(f"{opname}={val}")
+
+    return fallback_ops
+
 def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
     orig_device = example_inputs[0].device
     xla_dev = xm.xla_device()
@@ -69,6 +81,12 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
 
     tensor_id_to_arg_idx = {tensor_id: i for i, tensor_id in enumerate(args_tensor_ids)}
     xla_out = xla_model(*xla_args)
+    fallback_ops = get_fallback_ops()
+    if len(fallback_ops) > 0:
+        raise RuntimeError(
+            f"Fail to extact the compiled graph because of fallback: {','.join(fallback_ops)}"
+        )
+
     if not isinstance(xla_out, (tuple, list)):
         xla_out = (xla_out,)
 
