@@ -83,7 +83,7 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
 
     args_and_out = tuple(xla_args_need_update) + tuple(xla_out)
 
-    if debug or True:
+    if debug:
         print(f"XLA IR Text: {torch_xla._XLAC._get_xla_tensors_text(args_and_out)}")
         # print(f"XLA IR HLO: {torch_xla._XLAC._get_xla_tensors_hlo(args_and_out)}")
 
@@ -116,7 +116,8 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
         graph_input = graph_input_matcher(args)
         start_ts = time.time()
         res = torch_xla._XLAC._run_cached_graph(graph_hash, graph_input)
-        print(f"torchxla reuse compiled graph run_cached_graph takes {time.time() - start_ts} seconds") # TODO
+        if debug:
+            print(f"torchxla reuse compiled graph run_cached_graph takes {time.time() - start_ts} seconds") # TODO
 
         prepare_output_ts = time.time()
 
@@ -126,21 +127,18 @@ def extract_compiled_graph(model: torch.fx.GraphModule, example_inputs):
 
         for arg_index, res_index in arg_index_to_need_update_index.items():
             args[arg_index].copy_(res[res_index])
-        # for i, nede_update in enumerate(xla_args_need_update_bool):
-        #     if nede_update:
-        #         args[i].copy_(res[i])
-        #         ncopy += 1
 
-        print(f"Copy {ncopy} args takes {time.time() - copy_args_ts} seconds")
+        if debug:
+            print(f"Copy {ncopy} args takes {time.time() - copy_args_ts} seconds")
 
         # need to convert xla tensor back to eager tensor
         copy_res_ts = time.time()
         # First few elements might be xla_args that needs to be in place updated
         result = [x.to(device=eager_device) for x in res[len(xla_args_need_update):]]
-        print(f"Copy results takes {time.time() - copy_res_ts} seconds")
-
-        print(f"prepare output takes {time.time() - prepare_output_ts} seconds")
-        print(f"optimized_mod takes {time.time() - enter_ts} seconds overall")
+        if debug:
+            print(f"Copy results takes {time.time() - copy_res_ts} seconds")
+            print(f"prepare output takes {time.time() - prepare_output_ts} seconds")
+            print(f"optimized_mod takes {time.time() - enter_ts} seconds overall")
 
         return result
 

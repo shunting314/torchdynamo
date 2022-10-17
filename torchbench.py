@@ -1502,3 +1502,5 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     warnings.filterwarnings("ignore")
     main()
+    import torch_xla.debug.metrics as met; print(met.metrics_report())
+
