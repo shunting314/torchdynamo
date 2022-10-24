@@ -103,7 +103,7 @@ if HAS_PRIMS_REFS:
     FILENAME_ALLOWLIST |= {
         torch._prims.__file__,
         torch._prims.utils.__file__,
-        torch._prims.wrappers.__file__,
+        # torch._prims.wrappers.__file__,
         torch._refs.__file__,
         torch._refs.special.__file__,
         torch._refs.nn.functional.__file__,
